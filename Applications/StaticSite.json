@@ -1,0 +1,383 @@
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Description": "The CloudFormation configuration for my static site",
+  "Parameters": {
+    "AcmCertificateArn": {
+      "Type": "String",
+      "Description": "The acm arn for the static site distribution."
+    },
+    "AliasRecords": {
+      "Type": "String",
+      "Description": "A comma separated list of alias records that will serve the static site"
+    },
+    "GitHubOAuthToken": {
+      "Type": "String",
+      "Description": "An OAuth token from GitHub granting access to CodePipeline",
+      "NoEcho": true
+    }
+  },
+  "Resources": {
+    "S3Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "AccessControl": "PublicRead",
+        "BucketName": {
+          "Fn::Join": [
+            "-",
+            [
+              "cwilliams-io-static-",
+              {
+                "Ref": "AWS::AccountId"
+              },
+              {
+                "Ref": "AWS::Region"
+              }
+            ]
+          ]
+        },
+        "VersioningConfiguration": {
+          "Status": "Enabled"
+        },
+        "WebsiteConfiguration": {
+          "IndexDocument": "index.html",
+          "ErrorDocument": "error.html"
+        }
+      }
+    },
+    "S3BucketPolicy" : {
+      "Type" : "AWS::S3::BucketPolicy",
+      "Properties" : {
+        "Bucket" : {"Ref" : "S3Bucket"},
+        "PolicyDocument": {
+          "Version": "2012-10-17",
+          "Id": "ReadOnlyAccess",
+          "Statement": [
+            {
+              "Action":[
+                "s3:GetObject"
+              ],
+              "Effect": "Allow",
+              "Resource": { "Fn::Join" : ["", ["arn:aws:s3:::", { "Ref" : "S3Bucket" } , "/*" ]]},
+              "Principal": "*"
+            }
+          ]
+        }
+      }
+    },
+    "CloudFrontDistribution": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Aliases": {
+            "Fn::Split": [
+              ",",
+              {
+                "Ref": "AliasRecords"
+              }
+            ]
+          },
+          "DefaultCacheBehavior": {
+            "AllowedMethods": [
+              "GET",
+              "HEAD"
+            ],
+            "Compress": "true",
+            "DefaultTTL": 300,
+            "MaxTTL": 300,
+            "ForwardedValues": {
+              "Cookies": {
+                "Forward": "all"
+              },
+              "QueryString": "true"
+            },
+            "TargetOriginId": "MyOrigin",
+            "ViewerProtocolPolicy": "redirect-to-https"
+          },
+          "DefaultRootObject" : "index.html",
+          "Enabled": "true",
+          "HttpVersion": "http2",
+          "IPV6Enabled": "true",
+          "Origins": [
+            {
+              "DomainName": {
+                "Fn::Join": [
+                  "",
+                  [
+                    { "Ref": "S3Bucket" },
+                    ".s3-website-",
+                    { "Ref": "AWS::Region" },
+                    ".amazonaws.com"
+                  ]
+                ]
+              },
+              "Id": "MyOrigin",
+              "CustomOriginConfig": {
+                "OriginProtocolPolicy": "http-only",
+                "OriginSSLProtocols": [
+                  "TLSv1.1",
+                  "TLSv1.2"
+                ],
+                "OriginReadTimeout": "30"
+              }
+            }
+          ],
+          "ViewerCertificate": {
+            "AcmCertificateArn": {
+              "Ref": "AcmCertificateArn"
+            },
+            "MinimumProtocolVersion": "TLSv1.2_2018",
+            "SslSupportMethod": "sni-only"
+          },
+          "PriceClass": "PriceClass_100"
+        }
+      }
+    },
+    "CodeBuildIAMRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["codebuild.amazonaws.com"]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "InlinePolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Action": [
+                    "cloudwatch:*",
+                    "s3:*",
+                    "sns:*"
+                  ],
+                  "Resource": "*",
+                  "Effect": "Allow"
+                },
+                {
+                  "Action": [
+                    "logs:CreateLogGroup",
+                    "logs:CreateLogStream",
+                    "logs:PutLogEvents"
+                  ],
+                  "Resource": { "Fn::Sub": "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*"},
+                  "Effect": "Allow"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "CodeBuild": {
+      "Type": "AWS::CodeBuild::Project",
+      "Properties": {
+        "Artifacts": {
+          "Type": "CODEPIPELINE"
+        },
+        "Environment": {
+          "ComputeType": "BUILD_GENERAL1_SMALL",
+          "Image": "aws/codebuild/standard:2.0",
+          "Type": "LINUX_CONTAINER"
+        },
+        "Name": "StaticSiteBuild",
+        "ServiceRole": { "Fn::GetAtt": ["CodeBuildIAMRole", "Arn"] },
+        "Source": {
+          "Type": "CODEPIPELINE"
+        }
+      }
+    },
+    "CodePipelineIAMRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [
+            {
+              "Effect": "Allow",
+              "Principal": {
+                "Service": ["codepipeline.amazonaws.com"]
+              },
+              "Action": [
+                "sts:AssumeRole"
+              ]
+            }
+          ]
+        },
+        "Path": "/",
+        "Policies": [
+          {
+            "PolicyName": "InlinePolicy",
+            "PolicyDocument": {
+              "Version": "2012-10-17",
+              "Statement": [
+                {
+                  "Action": [
+                    "cloudwatch:*",
+                    "s3:*",
+                    "sns:*"
+                  ],
+                  "Resource": "*",
+                  "Effect": "Allow"
+                },
+                {
+                  "Action": [
+                    "lambda:InvokeFunction",
+                    "lambda:ListFunctions"
+                  ],
+                  "Resource": "*",
+                  "Effect": "Allow"
+                },
+                {
+                  "Action": [
+                    "codebuild:BatchGetBuilds",
+                    "codebuild:StartBuild"
+                  ],
+                  "Resource": "*",
+                  "Effect": "Allow"
+                }
+              ]
+            }
+          }
+        ]
+      }
+    },
+    "S3ArtifactBucket": {
+      "DeletionPolicy": "Retain",
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": {
+          "Fn::Join": [
+            "-",
+            [
+              "cwilliams-io-artifact",
+              {
+                "Ref": "AWS::AccountId"
+              },
+              {
+                "Ref": "AWS::Region"
+              },
+              "artifacts"
+            ]
+          ]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        }
+      }
+    },
+    "Pipeline": {
+      "Type": "AWS::CodePipeline::Pipeline",
+      "Properties": {
+        "Name": "StaticSitePipeline",
+        "RoleArn": {"Fn::GetAtt" : ["CodePipelineIAMRole", "Arn"] },
+        "ArtifactStore": {
+          "Type": "S3",
+          "Location": { "Ref" : "S3ArtifactBucket" }
+        },
+        "Stages": [
+          {
+            "Name": "Source",
+            "Actions": [
+              {
+                "Name": "GitHubSource",
+                "ActionTypeId": {
+                  "Category": "Source",
+                  "Owner": "ThirdParty",
+                  "Version": "1",
+                  "Provider": "GitHub"
+                },
+                "Configuration": {
+                  "Owner": "chrisw-devops",
+                  "Repo": "cwilliams.io",
+                  "PollForSourceChanges": "true",
+                  "Branch": "master",
+                  "OAuthToken": { "Ref": "GitHubOAuthToken" }
+                },
+                "RunOrder": "1",
+                "OutputArtifacts": [
+                  {
+                    "Name": "StaticSiteArtifact"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "Name": "Build",
+            "Actions": [
+              {
+                "Name": "Build",
+                "ActionTypeId": {
+                  "Category": "Build",
+                  "Owner": "AWS",
+                  "Version": "1",
+                  "Provider": "CodeBuild"
+                },
+                "Configuration": {
+                  "ProjectName": "StaticSiteBuild",
+                  "PrimarySource": "StaticSiteArtifact"
+                },
+                "InputArtifacts": [
+                  {
+                    "Name": "StaticSiteArtifact"
+                  }
+                ],
+                "RunOrder": "1",
+                "OutputArtifacts": [
+                  {
+                    "Name": "StaticSiteArtifactBuild"
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "Name": "DeployStaticSite",
+            "Actions": [
+              {
+                "Name": "DeployS3",
+                "ActionTypeId": {
+                  "Category": "Deploy",
+                  "Owner": "AWS",
+                  "Version": "1",
+                  "Provider": "S3"
+                },
+                "Configuration": {
+                  "BucketName": { "Ref": "S3Bucket" },
+                  "Extract": "true"
+                },
+                "RunOrder": "1",
+                "InputArtifacts": [
+                  {
+                    "Name": "StaticSiteArtifactBuild"
+                  }
+                ]
+              }
+            ]
+          }
+        ]
+      }
+    }
+  },
+  "Outputs": {
+    "CloudFrontEndpoint": {
+      "Description": "The CloudFront endpoint to add to the DNS record(s)",
+      "Value": { "Fn::GetAtt": [ "CloudFrontDistribution", "DomainName" ] }
+    }
+  }
+}
