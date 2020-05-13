@@ -369,8 +369,130 @@
                 ]
               }
             ]
+          },
+          {
+            "Name": "PostDeployActions",
+            "Actions": [
+              {
+                "Name": "ClearCloudFrontCache",
+                "ActionTypeId": {
+                  "Category": "Invoke",
+                  "Owner": "AWS",
+                  "Version": "1",
+                  "Provider": "Lambda"
+                },
+                "Configuration": {
+                  "FunctionName": { "Ref": "ClearCacheFunction" }
+                },
+                "RunOrder": "1",
+                "InputArtifacts": [],
+                "OutputArtifacts": []
+              }
+            ]
           }
         ]
+      }
+    },
+    "LambdaExecutionRole": {
+      "Type": "AWS::IAM::Role",
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Version": "2012-10-17",
+          "Statement": [{ "Effect": "Allow", "Principal": {"Service": ["lambda.amazonaws.com", "codepipeline.amazonaws.com"]}, "Action": ["sts:AssumeRole"] }]
+        },
+        "Path": "/",
+        "Policies": [{
+          "PolicyName": "root",
+          "PolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Effect": "Allow",
+                "Action": ["logs:*"],
+                "Resource": "arn:aws:logs:*:*:*"
+              },
+              {
+                "Effect": "Allow",
+                "Action": ["cloudfront:CreateInvalidation"],
+                "Resource": "arn:aws:cloudfront:*:*:*"
+              },
+              {
+                "Effect": "Allow",
+                "Action": [
+                  "codepipeline:PutJobSuccessResult",
+                  "codepipeline:PutJobFailureResult"
+                ],
+                "Resource": "*"
+              }
+            ]
+          }
+        }]
+      }
+    },
+    "ClearCacheFunction": {
+      "Type": "AWS::Lambda::Function",
+      "Properties": {
+        "Code": {
+          "ZipFile": {
+            "Fn::Join": [
+              "\n",
+              [
+                "import boto3",
+                "import json",
+                "import os",
+                "",
+                "print('Initialising')",
+                "",
+                "cloudfrontClient = boto3.client('cloudfront')",
+                "codepipelineClient = boto3.client('codepipeline')",
+                "",
+                "def lambda_handler(event, context):",
+                "\tprint(\"Running CloudFront cache clear for CodePipeline job \" + event['CodePipeline.job']['id'])",
+                "\tcodepipelineParams = {",
+                "\t\t'jobId': event['CodePipeline.job']['id']",
+                "\t}",
+                "\t",
+                "\ttry:",
+                "\t\tresponse = cloudfrontClient.create_invalidation(",
+                "\t\t\tDistributionId=os.environ['CLOUDFRONT_DISTRIBUTION'],",
+                "\t\t\tInvalidationBatch={",
+                "\t\t\t\t'Paths': {",
+                "\t\t\t\t\t'Quantity': 1,",
+                "\t\t\t\t\t'Items': [",
+                "\t\t\t\t\t\t'/*'",
+                "\t\t\t\t\t]",
+                "\t\t\t\t},",
+                "\t\t\t\t'CallerReference': event['CodePipeline.job']['id']",
+                "\t\t\t}",
+                "\t\t)",
+                "\t\t",
+                "\t\tcodepipelineClient.put_job_success_result(jobId = event['CodePipeline.job']['id'])",
+                "\t\t",
+                "\t\treturn response['Invalidation']['Id']",
+                "\texcept Exception as e:",
+                "\t\tprint(e)",
+                "\t\tcodepipelineClient.put_job_failure_result(",
+                "\t\t\tjobId = event['CodePipeline.job']['id'],",
+                "\t\t\tfailureDetails = {",
+                "\t\t\t\t'message': str(e),",
+                "\t\t\t\t'type': 'JobFailed'",
+                "\t\t\t}",
+                "\t\t)",
+                "\t\traise e"
+              ]
+            ]
+          }
+        },
+        "Environment": {
+          "Variables": {
+            "CLOUDFRONT_DISTRIBUTION": {
+              "Ref": "CloudFrontDistribution"
+            }
+          }
+        },
+        "Handler": "index.lambda_handler",
+        "Role": { "Fn::GetAtt" : ["LambdaExecutionRole", "Arn"] },
+        "Runtime": "python3.7"
       }
     }
   },
